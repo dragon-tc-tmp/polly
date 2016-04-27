@@ -156,11 +156,6 @@ static cl::opt<bool>
                            cl::Hidden, cl::init(false), cl::ZeroOrMore,
                            cl::cat(PollyCategory));
 
-static cl::opt<bool> AllowUnsigned("polly-allow-unsigned",
-                                   cl::desc("Allow unsigned expressions"),
-                                   cl::Hidden, cl::init(false), cl::ZeroOrMore,
-                                   cl::cat(PollyCategory));
-
 static cl::opt<bool, true>
     TrackFailures("polly-detect-track-failures",
                   cl::desc("Track failure strings in detecting scop regions"),
@@ -337,11 +332,10 @@ bool ScopDetection::onlyValidRequiredInvariantLoads(
 }
 
 bool ScopDetection::isAffine(const SCEV *S, Loop *Scope,
-                             DetectionContext &Context,
-                             Value *BaseAddress) const {
+                             DetectionContext &Context) const {
 
   InvariantLoadsSetTy AccessILS;
-  if (!isAffineExpr(&Context.CurRegion, Scope, S, *SE, BaseAddress, &AccessILS))
+  if (!isAffineExpr(&Context.CurRegion, Scope, S, *SE, &AccessILS))
     return false;
 
   if (!onlyValidRequiredInvariantLoads(AccessILS, Context))
@@ -393,13 +387,6 @@ bool ScopDetection::isValidBranch(BasicBlock &BB, BranchInst *BI,
   }
 
   ICmpInst *ICmp = cast<ICmpInst>(Condition);
-  // Unsigned comparisons are not allowed. They trigger overflow problems
-  // in the code generation.
-  //
-  // TODO: This is not sufficient and just hides bugs. However it does pretty
-  //       well.
-  if (ICmp->isUnsigned() && !AllowUnsigned)
-    return invalid<ReportUnsignedCond>(Context, /*Assert=*/true, BI, &BB);
 
   // Are both operands of the ICmp affine?
   if (isa<UndefValue>(ICmp->getOperand(0)) ||
@@ -738,7 +725,7 @@ bool ScopDetection::hasValidArraySizes(DetectionContext &Context,
   Value *BaseValue = BasePointer->getValue();
   Region &CurRegion = Context.CurRegion;
   for (const SCEV *DelinearizedSize : Sizes) {
-    if (!isAffine(DelinearizedSize, Scope, Context, nullptr)) {
+    if (!isAffine(DelinearizedSize, Scope, Context)) {
       Sizes.clear();
       break;
     }
@@ -766,7 +753,7 @@ bool ScopDetection::hasValidArraySizes(DetectionContext &Context,
       const Instruction *Insn = Pair.first;
       const SCEV *AF = Pair.second;
 
-      if (!isAffine(AF, Scope, Context, BaseValue)) {
+      if (!isAffine(AF, Scope, Context)) {
         invalid<ReportNonAffineAccess>(Context, /*Assert=*/true, AF, Insn,
                                        BaseValue);
         if (!KeepGoing)
@@ -800,7 +787,7 @@ bool ScopDetection::computeAccessFunctions(
     auto *Scope = LI->getLoopFor(Insn->getParent());
 
     if (!AF) {
-      if (isAffine(Pair.second, Scope, Context, BaseValue))
+      if (isAffine(Pair.second, Scope, Context))
         Acc->DelinearizedSubscripts.push_back(Pair.second);
       else
         IsNonAffine = true;
@@ -810,7 +797,7 @@ bool ScopDetection::computeAccessFunctions(
       if (Acc->DelinearizedSubscripts.size() == 0)
         IsNonAffine = true;
       for (const SCEV *S : Acc->DelinearizedSubscripts)
-        if (!isAffine(S, Scope, Context, BaseValue))
+        if (!isAffine(S, Scope, Context))
           IsNonAffine = true;
     }
 
@@ -917,7 +904,7 @@ bool ScopDetection::isValidAccess(Instruction *Inst, const SCEV *AF,
       IsVariantInNonAffineLoop = true;
 
   auto *Scope = LI->getLoopFor(Inst->getParent());
-  bool IsAffine = !IsVariantInNonAffineLoop && isAffine(AF, Scope, Context, BV);
+  bool IsAffine = !IsVariantInNonAffineLoop && isAffine(AF, Scope, Context);
   // Do not try to delinearize memory intrinsics and force them to be affine.
   if (isa<MemIntrinsic>(Inst) && !IsAffine) {
     return invalid<ReportNonAffineAccess>(Context, /*Assert=*/true, AF, Inst,
@@ -1248,7 +1235,8 @@ bool ScopDetection::allBlocksValid(DetectionContext &Context) const {
 
   for (const BasicBlock *BB : CurRegion.blocks()) {
     Loop *L = LI->getLoopFor(BB);
-    if (L && L->getHeader() == BB && (!isValidLoop(L, Context) && !KeepGoing))
+    if (L && L->getHeader() == BB && CurRegion.contains(L) &&
+        (!isValidLoop(L, Context) && !KeepGoing))
       return false;
   }
 
