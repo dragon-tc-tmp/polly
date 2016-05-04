@@ -66,7 +66,7 @@ STATISTIC(RichScopFound, "Number of Scops containing a loop");
 // The maximal number of basic sets we allow during domain construction to
 // be created. More complex scops will result in very high compile time and
 // are also unlikely to result in good code
-static int const MaxConjunctsInDomain = 20;
+static int const MaxDisjunctionsInDomain = 20;
 
 static cl::opt<bool> PollyRemarksMinimal(
     "polly-remarks-minimal",
@@ -104,6 +104,11 @@ static cl::opt<bool> DetectReductions("polly-detect-reductions",
                                       cl::desc("Detect and exploit reductions"),
                                       cl::Hidden, cl::ZeroOrMore,
                                       cl::init(true), cl::cat(PollyCategory));
+
+static cl::opt<bool>
+    IslOnErrorAbort("polly-on-isl-error-abort",
+                    cl::desc("Abort if an isl error is encountered"),
+                    cl::init(true), cl::cat(PollyCategory));
 
 //===----------------------------------------------------------------------===//
 
@@ -1045,8 +1050,8 @@ __isl_give isl_map *ScopStmt::getSchedule() const {
   return M;
 }
 
-__isl_give isl_pw_aff *ScopStmt::getPwAff(const SCEV *E) {
-  PWACtx PWAC = getParent()->getPwAff(E, getEntryBlock());
+__isl_give isl_pw_aff *ScopStmt::getPwAff(const SCEV *E, bool NonNegative) {
+  PWACtx PWAC = getParent()->getPwAff(E, getEntryBlock(), NonNegative);
   InvalidDomain = isl_set_union(InvalidDomain, PWAC.second);
   return PWAC.first;
 }
@@ -1315,20 +1320,12 @@ buildConditionSets(ScopStmt &Stmt, Value *Condition, TerminatorInst *TI,
 
     ScalarEvolution &SE = *S.getSE();
     isl_pw_aff *LHS, *RHS;
-    LHS = Stmt.getPwAff(SE.getSCEVAtScope(ICond->getOperand(0), L));
-    RHS = Stmt.getPwAff(SE.getSCEVAtScope(ICond->getOperand(1), L));
-
-    if (ICond->isUnsigned()) {
-      // For unsigned comparisons we assumed the signed bit of neither operand
-      // to be set. The comparison is equal to a signed comparison under this
-      // assumption.
-      auto *BB = Stmt.getEntryBlock();
-      S.recordAssumption(UNSIGNED, isl_pw_aff_nonneg_set(isl_pw_aff_copy(LHS)),
-                         TI->getDebugLoc(), AS_ASSUMPTION, BB);
-      S.recordAssumption(UNSIGNED, isl_pw_aff_nonneg_set(isl_pw_aff_copy(RHS)),
-                         TI->getDebugLoc(), AS_ASSUMPTION, BB);
-    }
-
+    // For unsigned comparisons we assumed the signed bit of neither operand
+    // to be set. The comparison is equal to a signed comparison under this
+    // assumption.
+    bool NonNeg = ICond->isUnsigned();
+    LHS = Stmt.getPwAff(SE.getSCEVAtScope(ICond->getOperand(0), L), NonNeg);
+    RHS = Stmt.getPwAff(SE.getSCEVAtScope(ICond->getOperand(1), L), NonNeg);
     ConsequenceCondSet =
         buildConditionSet(ICond->getPredicate(), LHS, RHS, Domain);
   }
@@ -1342,16 +1339,17 @@ buildConditionSets(ScopStmt &Stmt, Value *Condition, TerminatorInst *TI,
       isl_set_intersect(ConsequenceCondSet, isl_set_copy(Domain)));
 
   isl_set *AlternativeCondSet = nullptr;
-  bool ToComplex =
-      isl_set_n_basic_set(ConsequenceCondSet) >= MaxConjunctsInDomain;
+  bool TooComplex =
+      isl_set_n_basic_set(ConsequenceCondSet) >= MaxDisjunctionsInDomain;
 
-  if (!ToComplex) {
+  if (!TooComplex) {
     AlternativeCondSet = isl_set_subtract(isl_set_copy(Domain),
                                           isl_set_copy(ConsequenceCondSet));
-    ToComplex = isl_set_n_basic_set(AlternativeCondSet) >= MaxConjunctsInDomain;
+    TooComplex =
+        isl_set_n_basic_set(AlternativeCondSet) >= MaxDisjunctionsInDomain;
   }
 
-  if (ToComplex) {
+  if (TooComplex) {
     S.invalidate(COMPLEXITY, TI ? TI->getDebugLoc() : DebugLoc());
     isl_set_free(AlternativeCondSet);
     AlternativeCondSet = isl_set_empty(isl_set_get_space(ConsequenceCondSet));
@@ -2098,7 +2096,7 @@ static isl_stat buildMinMaxAccess(__isl_take isl_set *Set, void *User) {
 
   Set = isl_set_remove_divs(Set);
 
-  if (isl_set_n_basic_set(Set) >= MaxConjunctsInDomain) {
+  if (isl_set_n_basic_set(Set) >= MaxDisjunctionsInDomain) {
     isl_set_free(Set);
     return isl_stat_error;
   }
@@ -2422,9 +2420,9 @@ void Scop::propagateInvalidStmtDomains(Region *R, ScopDetection &SD,
       unsigned NumConjucts = isl_set_n_basic_set(SuccInvalidDomain);
       SuccStmt->setInvalidDomain(SuccInvalidDomain);
 
-      // Check if the maximal number of domain conjuncts was reached.
+      // Check if the maximal number of domain disjunctions was reached.
       // In case this happens we will bail.
-      if (NumConjucts < MaxConjunctsInDomain)
+      if (NumConjucts < MaxDisjunctionsInDomain)
         continue;
 
       isl_set_free(InvalidDomain);
@@ -2600,9 +2598,9 @@ bool Scop::buildDomainsWithBranchConstraints(Region *R, ScopDetection &SD,
         SuccDomain = CondSet;
       }
 
-      // Check if the maximal number of domain conjuncts was reached.
+      // Check if the maximal number of domain disjunctions was reached.
       // In case this happens we will clean up and bail.
-      if (isl_set_n_basic_set(SuccDomain) < MaxConjunctsInDomain)
+      if (isl_set_n_basic_set(SuccDomain) < MaxDisjunctionsInDomain)
         continue;
 
       invalidate(COMPLEXITY, DebugLoc());
@@ -3072,7 +3070,8 @@ Scop::Scop(Region &R, ScalarEvolution &ScalarEvolution, LoopInfo &LI,
       MaxLoopDepth(MaxLoopDepth), IslCtx(isl_ctx_alloc(), isl_ctx_free),
       Context(nullptr), Affinator(this, LI), AssumedContext(nullptr),
       InvalidContext(nullptr), Schedule(nullptr) {
-  isl_options_set_on_error(getIslCtx(), ISL_ON_ERROR_ABORT);
+  if (IslOnErrorAbort)
+    isl_options_set_on_error(getIslCtx(), ISL_ON_ERROR_ABORT);
   buildContext();
 }
 
@@ -3221,7 +3220,7 @@ void Scop::simplifySCoP(bool RemoveIgnoredStmts, DominatorTree &DT,
   }
 }
 
-const InvariantEquivClassTy *Scop::lookupInvariantEquivClass(Value *Val) const {
+InvariantEquivClassTy *Scop::lookupInvariantEquivClass(Value *Val) {
   LoadInst *LInst = dyn_cast<LoadInst>(Val);
   if (!LInst)
     return nullptr;
@@ -3282,7 +3281,7 @@ void Scop::addInvariantLoads(ScopStmt &Stmt, MemoryAccessList &InvMAs) {
   isl_set *DomainCtx = isl_set_params(Stmt.getDomain());
   DomainCtx = isl_set_subtract(DomainCtx, StmtInvalidCtx);
 
-  if (isl_set_n_basic_set(DomainCtx) >= MaxConjunctsInDomain) {
+  if (isl_set_n_basic_set(DomainCtx) >= MaxDisjunctionsInDomain) {
     auto *AccInst = InvMAs.front()->getAccessInstruction();
     invalidate(COMPLEXITY, AccInst->getDebugLoc());
     isl_set_free(DomainCtx);
@@ -3651,12 +3650,28 @@ void Scop::addRecordedAssumptions() {
   while (!RecordedAssumptions.empty()) {
     const Assumption &AS = RecordedAssumptions.pop_back_val();
 
-    isl_set *S = AS.Set;
-    // If a basic block was given use its domain to simplify the assumption.
-    if (AS.BB)
-      S = isl_set_params(isl_set_intersect(S, getDomainConditions(AS.BB)));
+    if (!AS.BB) {
+      addAssumption(AS.Kind, AS.Set, AS.Loc, AS.Sign);
+      continue;
+    }
 
-    addAssumption(AS.Kind, S, AS.Loc, AS.Sign);
+    // If a basic block was given use its domain to simplify the assumption.
+    // In case of restrictions we know they only have to hold on the domain,
+    // thus we can intersect them with the domain of the block. However, for
+    // assumptions the domain has to imply them, thus:
+    //                     _              _____
+    //   Dom => S   <==>   A v B   <==>   A - B
+    //
+    // To avoid the complement we will register A - B as a restricton not an
+    // assumption.
+    isl_set *S = AS.Set;
+    isl_set *Dom = getDomainConditions(AS.BB);
+    if (AS.Sign == AS_RESTRICTION)
+      S = isl_set_params(isl_set_intersect(S, Dom));
+    else /* (AS.Sign == AS_ASSUMPTION) */
+      S = isl_set_params(isl_set_subtract(Dom, S));
+
+    addAssumption(AS.Kind, S, AS.Loc, AS_RESTRICTION);
   }
 }
 
@@ -3773,15 +3788,19 @@ void Scop::dump() const { print(dbgs()); }
 
 isl_ctx *Scop::getIslCtx() const { return IslCtx.get(); }
 
-__isl_give PWACtx Scop::getPwAff(const SCEV *E, BasicBlock *BB) {
+__isl_give PWACtx Scop::getPwAff(const SCEV *E, BasicBlock *BB,
+                                 bool NonNegative) {
   // First try to use the SCEVAffinator to generate a piecewise defined
   // affine function from @p E in the context of @p BB. If that tasks becomes to
   // complex the affinator might return a nullptr. In such a case we invalidate
   // the SCoP and return a dummy value. This way we do not need to add error
   // handling cdoe to all users of this function.
   auto PWAC = Affinator.getPwAff(E, BB);
-  if (PWAC.first)
+  if (PWAC.first) {
+    if (NonNegative)
+      Affinator.takeNonNegativeAssumption(PWAC);
     return PWAC;
+  }
 
   auto DL = BB ? BB->getTerminator()->getDebugLoc() : DebugLoc();
   invalidate(COMPLEXITY, DL);
