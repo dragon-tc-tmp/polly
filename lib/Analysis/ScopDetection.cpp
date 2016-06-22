@@ -462,7 +462,7 @@ bool ScopDetection::isValidCallInst(CallInst &CI,
   Function *CalledFunction = CI.getCalledFunction();
 
   // Indirect calls are not supported.
-  if (CalledFunction == 0)
+  if (CalledFunction == nullptr)
     return false;
 
   if (AllowModrefCall) {
