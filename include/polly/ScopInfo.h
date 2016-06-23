@@ -275,7 +275,7 @@ public:
   /// @brief The set of derived indirect SAIs for this origin SAI.
   const SmallPtrSetImpl<ScopArrayInfo *> &getDerivedSAIs() const {
     return DerivedSAIs;
-  };
+  }
 
   /// @brief Return the number of dimensions.
   unsigned getNumberOfDimensions() const {
@@ -321,7 +321,7 @@ public:
   __isl_give isl_id *getBasePtrId() const;
 
   /// @brief Is this array info modeling an llvm::Value?
-  bool isValueKind() const { return Kind == MK_Value; };
+  bool isValueKind() const { return Kind == MK_Value; }
 
   /// @brief Is this array info modeling special PHI node memory?
   ///
@@ -333,13 +333,13 @@ public:
   /// original PHI node as virtual base pointer, we have this additional
   /// attribute to distinguish the PHI node specific array modeling from the
   /// normal scalar array modeling.
-  bool isPHIKind() const { return Kind == MK_PHI; };
+  bool isPHIKind() const { return Kind == MK_PHI; }
 
   /// @brief Is this array info modeling an MK_ExitPHI?
-  bool isExitPHIKind() const { return Kind == MK_ExitPHI; };
+  bool isExitPHIKind() const { return Kind == MK_ExitPHI; }
 
   /// @brief Is this array info modeling an array?
-  bool isArrayKind() const { return Kind == MK_Array; };
+  bool isArrayKind() const { return Kind == MK_Array; }
 
   /// @brief Dump a readable representation to stderr.
   void dump() const;
@@ -1773,7 +1773,7 @@ private:
 
     LoopStackElement(Loop *L, __isl_give isl_schedule *S,
                      unsigned NumBlocksProcessed)
-        : L(L), Schedule(S), NumBlocksProcessed(NumBlocksProcessed){};
+        : L(L), Schedule(S), NumBlocksProcessed(NumBlocksProcessed) {}
   } LoopStackElementTy;
 
   /// @brief The loop stack used for schedule construction.
