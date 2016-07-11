@@ -3235,7 +3235,7 @@ InvariantEquivClassTy *Scop::lookupInvariantEquivClass(Value *Val) {
   Type *Ty = LInst->getType();
   const SCEV *PointerSCEV = SE->getSCEV(LInst->getPointerOperand());
   for (auto &IAClass : InvariantEquivClasses) {
-    if (PointerSCEV != IAClass.IdentifyingPointer || Ty != IAClass.Type)
+    if (PointerSCEV != IAClass.IdentifyingPointer || Ty != IAClass.AccessType)
       continue;
 
     auto &MAs = IAClass.InvariantAccesses;
@@ -3340,7 +3340,7 @@ void Scop::addInvariantLoads(ScopStmt &Stmt, MemoryAccessList &InvMAs) {
 
     bool Consolidated = false;
     for (auto &IAClass : InvariantEquivClasses) {
-      if (PointerSCEV != IAClass.IdentifyingPointer || Ty != IAClass.Type)
+      if (PointerSCEV != IAClass.IdentifyingPointer || Ty != IAClass.AccessType)
         continue;
 
       // If the pointer and the type is equal check if the access function wrt.
