@@ -2001,8 +2001,8 @@ void Scop::buildInvariantEquivalenceClasses(ScopDetection &SD) {
     }
 
     ClassRep = LInst;
-    InvariantEquivClasses.emplace_back(PointerSCEV, MemoryAccessList(), nullptr,
-                                       Ty);
+    InvariantEquivClasses.emplace_back(
+        InvariantEquivClassTy{PointerSCEV, MemoryAccessList(), nullptr, Ty});
   }
 }
 
@@ -3149,7 +3149,7 @@ Scop::~Scop() {
   }
 
   for (const auto &IAClass : InvariantEquivClasses)
-    isl_set_free(std::get<2>(IAClass));
+    isl_set_free(IAClass.ExecutionContext);
 
   // Explicitly release all Scop objects and the underlying isl objects before
   // we relase the isl context.
@@ -3235,10 +3235,10 @@ InvariantEquivClassTy *Scop::lookupInvariantEquivClass(Value *Val) {
   Type *Ty = LInst->getType();
   const SCEV *PointerSCEV = SE->getSCEV(LInst->getPointerOperand());
   for (auto &IAClass : InvariantEquivClasses) {
-    if (PointerSCEV != std::get<0>(IAClass) || Ty != std::get<3>(IAClass))
+    if (PointerSCEV != IAClass.IdentifyingPointer || Ty != IAClass.Type)
       continue;
 
-    auto &MAs = std::get<1>(IAClass);
+    auto &MAs = IAClass.InvariantAccesses;
     for (auto *MA : MAs)
       if (MA->getAccessInstruction() == Val)
         return &IAClass;
@@ -3340,7 +3340,7 @@ void Scop::addInvariantLoads(ScopStmt &Stmt, MemoryAccessList &InvMAs) {
 
     bool Consolidated = false;
     for (auto &IAClass : InvariantEquivClasses) {
-      if (PointerSCEV != std::get<0>(IAClass) || Ty != std::get<3>(IAClass))
+      if (PointerSCEV != IAClass.IdentifyingPointer || Ty != IAClass.Type)
         continue;
 
       // If the pointer and the type is equal check if the access function wrt.
@@ -3348,7 +3348,7 @@ void Scop::addInvariantLoads(ScopStmt &Stmt, MemoryAccessList &InvMAs) {
       // parameter values and these can be different for distinct part of the
       // SCoP. If this happens we cannot consolidate the loads but need to
       // create a new invariant load equivalence class.
-      auto &MAs = std::get<1>(IAClass);
+      auto &MAs = IAClass.InvariantAccesses;
       if (!MAs.empty()) {
         auto *LastMA = MAs.front();
 
@@ -3368,7 +3368,7 @@ void Scop::addInvariantLoads(ScopStmt &Stmt, MemoryAccessList &InvMAs) {
       Consolidated = true;
 
       // Unify the execution context of the class and this statement.
-      isl_set *&IAClassDomainCtx = std::get<2>(IAClass);
+      isl_set *&IAClassDomainCtx = IAClass.ExecutionContext;
       if (IAClassDomainCtx)
         IAClassDomainCtx =
             isl_set_coalesce(isl_set_union(IAClassDomainCtx, MACtx));
@@ -3382,8 +3382,8 @@ void Scop::addInvariantLoads(ScopStmt &Stmt, MemoryAccessList &InvMAs) {
 
     // If we did not consolidate MA, thus did not find an equivalence class
     // for it, we create a new one.
-    InvariantEquivClasses.emplace_back(PointerSCEV, MemoryAccessList{MA}, MACtx,
-                                       Ty);
+    InvariantEquivClasses.emplace_back(
+        InvariantEquivClassTy{PointerSCEV, MemoryAccessList{MA}, MACtx, Ty});
   }
 
   isl_set_free(DomainCtx);
@@ -3773,12 +3773,13 @@ void Scop::print(raw_ostream &OS) const {
   OS.indent(4) << "Max Loop Depth:  " << getMaxLoopDepth() << "\n";
   OS.indent(4) << "Invariant Accesses: {\n";
   for (const auto &IAClass : InvariantEquivClasses) {
-    const auto &MAs = std::get<1>(IAClass);
+    const auto &MAs = IAClass.InvariantAccesses;
     if (MAs.empty()) {
-      OS.indent(12) << "Class Pointer: " << *std::get<0>(IAClass) << "\n";
+      OS.indent(12) << "Class Pointer: " << *IAClass.IdentifyingPointer << "\n";
     } else {
       MAs.front()->print(OS);
-      OS.indent(12) << "Execution Context: " << std::get<2>(IAClass) << "\n";
+      OS.indent(12) << "Execution Context: " << IAClass.ExecutionContext
+                    << "\n";
     }
   }
   OS.indent(4) << "}\n";
